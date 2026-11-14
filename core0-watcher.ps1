@@ -1,12 +1,9 @@
 param(
-    [switch]$Once,
-    [switch]$Remove
+    [switch]$Once
 )
 
 $ErrorActionPreference = 'Stop'
-$taskName = 'Copilot-Core0-CPU-Set-Watcher'
 $dataDir = $PSScriptRoot
-$statePath = Join-Path $dataDir 'process-state.json'
 $logPath = Join-Path $dataDir 'watcher.log'
 $excludedGroup = 0
 $excludedLogicalProcessors = @(0, 1)
@@ -24,8 +21,6 @@ using System.Runtime.InteropServices;
 public static class Core0CpuSets {
     [DllImport("kernel32.dll", SetLastError=true)]
     public static extern bool GetSystemCpuSetInformation(IntPtr info, uint length, out uint returnedLength, IntPtr process, uint flags);
-    [DllImport("kernel32.dll", SetLastError=true)]
-    public static extern bool GetProcessDefaultCpuSets(IntPtr process, uint[] ids, uint count, out uint requiredCount);
     [DllImport("kernel32.dll", SetLastError=true)]
     public static extern bool SetProcessDefaultCpuSets(IntPtr process, uint[] ids, uint count);
     [DllImport("kernel32.dll", SetLastError=true)]
@@ -90,191 +85,63 @@ function Get-ProcessStartKey($Process) {
     catch { return 'unknown' }
 }
 
-function Get-OriginalCpuSetIds([IntPtr]$Handle) {
-    [uint32]$needed = 0
-    if (-not [Core0CpuSets]::GetProcessDefaultCpuSets($Handle, $null, 0, [ref]$needed)) {
-        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        if ($errorCode -ne 122 -and $errorCode -ne 0) {
-            throw "GetProcessDefaultCpuSets failed: $errorCode"
-        }
-    }
-    if ($needed -eq 0) { return ,@() }
-
-    $ids = [uint32[]]::new($needed)
-    if (-not [Core0CpuSets]::GetProcessDefaultCpuSets($Handle, $ids, $needed, [ref]$needed)) {
-        throw "GetProcessDefaultCpuSets failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
-    }
-    return ,$ids
-}
-
 function Set-DefaultCpuSetIds([IntPtr]$Handle, [uint32[]]$Ids) {
-    $count = if ($null -eq $Ids) { 0 } else { $Ids.Length }
-    if (-not [Core0CpuSets]::SetProcessDefaultCpuSets($Handle, $Ids, [uint32]$count)) {
+    if (-not [Core0CpuSets]::SetProcessDefaultCpuSets($Handle, $Ids, [uint32]$Ids.Length)) {
         throw "SetProcessDefaultCpuSets failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
 }
 
-function Read-State {
-    if (Test-Path -LiteralPath $statePath) {
-        try {
-            $json = [IO.File]::ReadAllText($statePath)
-            $trimmed = $json.Trim()
-            if ($trimmed -match '^\[\s*\]$') { return @() }
-            if (-not ($trimmed.StartsWith('[') -or $trimmed.StartsWith('{'))) {
-                throw 'Expected a JSON array or object.'
-            }
-            $decoded = ConvertFrom-Json -InputObject $json -ErrorAction Stop
-            $entries = @($decoded)
-            if ($entries.Count -eq 0) { throw 'State contains no valid entries.' }
-            foreach ($entry in $entries) {
-                foreach ($name in @('Key', 'ProcessId', 'StartKey', 'CpuSetIds')) {
-                    if ($null -eq $entry -or $entry.PSObject.Properties.Name -notcontains $name) {
-                        throw "State entry is missing $name."
-                    }
-                }
-            }
-            return $entries
-        } catch {
-            throw [IO.InvalidDataException]::new(
-                "Cannot read process state at ${statePath}: $($_.Exception.Message). Preserve the file and restore a valid backup before restarting.",
-                $_.Exception
-            )
-        }
+function Set-ProcessCpuSets($Process, [uint32[]]$CpuSetIds) {
+    $handle = [Core0CpuSets]::OpenProcess(0x0200 -bor 0x1000 -bor 0x2000, $false, $Process.Id)
+    if ($handle -eq [IntPtr]::Zero) {
+        Write-Log "SKIP $($Process.ProcessName) pid=$($Process.Id): OpenProcess error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+        return $false
     }
-    return @()
-}
 
-function Save-State($State) {
-    $entries = [object[]]@($State)
-    $json = ConvertTo-Json -InputObject $entries -Depth 5
-    $tempPath = "$statePath.$([Guid]::NewGuid().ToString('N')).tmp"
     try {
-        [IO.File]::WriteAllText($tempPath, $json, [Text.UTF8Encoding]::new($true))
-        if ([IO.File]::Exists($statePath)) {
-            [IO.File]::Replace($tempPath, $statePath, "$statePath.bak")
-        } else {
-            [IO.File]::Move($tempPath, $statePath)
-        }
+        Set-DefaultCpuSetIds $handle $CpuSetIds
+        Write-Log "SET $($Process.ProcessName) pid=$($Process.Id) to $($CpuSetIds.Count) CPU sets"
+        return $true
+    } catch {
+        Write-Log "ERROR $($Process.ProcessName) pid=$($Process.Id): $($_.Exception.Message)"
+        return $false
     } finally {
-        if ([IO.File]::Exists($tempPath)) { [IO.File]::Delete($tempPath) }
+        [void][Core0CpuSets]::CloseHandle($handle)
     }
 }
 
-function Invoke-Apply {
+function Invoke-Apply([hashtable]$Known) {
     $allowedIds = Get-CpuSetIds
-    $state = [System.Collections.Generic.List[object]]::new()
-    $known = @{}
-    foreach ($entry in (Read-State)) { $state.Add($entry); $known[$entry.Key] = $true }
     $seen = @{}
-    $dirty = $false
 
     foreach ($process in (Get-Process | Where-Object { $_.Id -gt 4 -and $skipNames -notcontains $_.ProcessName })) {
         $startKey = Get-ProcessStartKey $process
         $key = "$($process.Id):$startKey"
         $seen[$key] = $true
-        if ($known.ContainsKey($key)) { continue }
-        $known[$key] = $true
-
-        $handle = [Core0CpuSets]::OpenProcess(0x0200 -bor 0x1000 -bor 0x2000, $false, $process.Id)
-        if ($handle -eq [IntPtr]::Zero) {
-            Write-Log "SKIP $($process.ProcessName) pid=$($process.Id): OpenProcess error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
-            $state.Add([pscustomobject]@{
-                Key = $key
-                ProcessId = $process.Id
-                ProcessName = $process.ProcessName
-                StartKey = $startKey
-                CpuSetIds = @()
-                Applied = $false
-            })
-            $dirty = $true
-            continue
-        }
-        try {
-            $oldIds = Get-OriginalCpuSetIds $handle
-            Set-DefaultCpuSetIds $handle $allowedIds
-            $state.Add([pscustomobject]@{
-                Key = $key
-                ProcessId = $process.Id
-                ProcessName = $process.ProcessName
-                StartKey = $startKey
-                CpuSetIds = @($oldIds)
-                Applied = $true
-            })
-            Write-Log "SET $($process.ProcessName) pid=$($process.Id) to $($allowedIds.Count) CPU sets"
-            $dirty = $true
-        } catch {
-            Write-Log "ERROR $($process.ProcessName) pid=$($process.Id): $($_.Exception.Message)"
-            $state.Add([pscustomobject]@{
-                Key = $key
-                ProcessId = $process.Id
-                ProcessName = $process.ProcessName
-                StartKey = $startKey
-                CpuSetIds = @()
-                Applied = $false
-            })
-            $dirty = $true
-        } finally {
-            [void][Core0CpuSets]::CloseHandle($handle)
-        }
+        if ($Known.ContainsKey($key)) { continue }
+        $Known[$key] = $true
+        [void](Set-ProcessCpuSets $process $allowedIds)
     }
 
-    $retained = @($state | Where-Object { $seen.ContainsKey($_.Key) })
-    if ($retained.Count -ne $state.Count) {
-        $state = [System.Collections.Generic.List[object]]::new([object[]]$retained)
-        $dirty = $true
-    }
-    if ($dirty) { Save-State $state }
-}
-
-function Invoke-Restore {
-    $state = Read-State
-    foreach ($entry in $state) {
-        if ($entry.PSObject.Properties.Name -contains 'Applied' -and -not $entry.Applied) { continue }
-        try {
-            $process = Get-Process -Id ([int]$entry.ProcessId) -ErrorAction Stop
-            if ((Get-ProcessStartKey $process) -ne [string]$entry.StartKey) { continue }
-            $handle = [Core0CpuSets]::OpenProcess(0x0200 -bor 0x1000 -bor 0x2000, $false, [int]$entry.ProcessId)
-            if ($handle -eq [IntPtr]::Zero) {
-                Write-Log "RESTORE-SKIP $($entry.ProcessName) pid=$($entry.ProcessId): OpenProcess error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
-                continue
-            }
-            try {
-                $ids = [uint32[]]@($entry.CpuSetIds | ForEach-Object { [uint32]$_ })
-                Set-DefaultCpuSetIds $handle $ids
-                Write-Log "RESTORE $($entry.ProcessName) pid=$($entry.ProcessId)"
-            } finally {
-                [void][Core0CpuSets]::CloseHandle($handle)
-            }
-        } catch {
-            Write-Log "RESTORE-ERROR pid=$($entry.ProcessId): $($_.Exception.Message)"
+    foreach ($key in @($Known.Keys)) {
+        if (-not $seen.ContainsKey($key)) {
+            [void]$Known.Remove($key)
         }
     }
 }
 
 New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
 
-if ($Remove) {
-    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-    $watcherPattern = '-File\s+"?' + [regex]::Escape($PSCommandPath) + '"?(\s|$)'
-    Get-CimInstance Win32_Process | Where-Object {
-        $_.ProcessId -ne $PID -and $_.CommandLine -match $watcherPattern
-    } | ForEach-Object {
-        Stop-Process -Id ([int]$_.ProcessId) -Force -ErrorAction SilentlyContinue
-    }
-    Invoke-Restore
-    Remove-Item -LiteralPath $statePath -ErrorAction SilentlyContinue
-    Write-Log 'Watcher task removed and saved process settings restored where possible.'
-    exit
-}
+$known = @{}
 
 if ($Once) {
-    Invoke-Apply
+    Invoke-Apply $known
     exit
 }
 
 Write-Log "Watcher started as $([Security.Principal.WindowsIdentity]::GetCurrent().Name) in session $((Get-Process -Id $PID).SessionId)."
 while ($true) {
-    try { Invoke-Apply }
+    try { Invoke-Apply $known }
     catch {
         Write-Log "WATCHER-ERROR $($_.Exception.Message)"
         exit 1

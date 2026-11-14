@@ -14,7 +14,8 @@ After changing the CPU sets, a later sample showed core 0 load around 5%. This d
 
 - Enumerates every running process every 500 ms (all sessions, including services such as databases).
 - For each new process, calls `SetProcessDefaultCpuSets` with every CPU set **except** group 0, logical processors 0 and 1.
-- Records each process's original CPU-set assignment in `process-state.json` so it can be restored. Updates are written to a temporary file and atomically replaced, with the previous version retained as `process-state.json.bak`.
+- Keeps only an in-memory list of processes it has already checked, so each process is adjusted once and the list is rebuilt automatically if the watcher restarts.
+- Does not save previous CPU-set selections or any per-process state.
 - Skips core OS processes: `Idle`, `System`, `Registry`, `Secure System`, `Memory Compression`, `smss`, `csrss`, `wininit`, `winlogon`, `services`, `lsass`, `LsaIso`.
 - Logs actions to `watcher.log` (rotated to `watcher.log.old` at 5 MB).
 
@@ -25,17 +26,17 @@ It does **not** change kernel ISR/DPC routing, and it does not use hard affinity
 - Protected processes (Microsoft Defender, some `svchost` instances, WSL `init`) cannot be opened even by SYSTEM and are skipped with `OpenProcess error 5`.
 - `OpenProcess error 87` can mean a process exited before it could be adjusted; other errors should be investigated.
 - The watcher sleeps for 500 ms between scans. A process may run on cores 0–1 until a subsequent scan finishes.
-- On an unexpected error, the watcher logs the error and exits; Task Scheduler may restart it up to three times. If saved state is invalid, preserve the file and restore a valid backup before restarting.
+- On an unexpected error, the watcher logs the error and exits; Task Scheduler may restart it up to three times.
 - The excluded cores are hardcoded (`$excludedGroup` / `$excludedLogicalProcessors` at the top of the script).
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `core0-watcher.ps1` | The watcher. Runs continuously, or with `-Once` / `-Remove`. |
+| `core0-watcher.ps1` | The watcher. Runs continuously, or with `-Once`. |
 | `install-system-task.ps1` | Elevated installer. Locks down the folder ACL and registers the startup task. |
 
-Runtime files created next to the script (git-ignored): `process-state.json` and its backups, `watcher.log`, and `install-result.txt`.
+Runtime files created next to the script (git-ignored): `watcher.log` and `install-result.txt`.
 
 ## Install
 
@@ -61,9 +62,6 @@ The install directory and its parent directories must not be replaceable by untr
 ```powershell
 # Apply once without staying resident
 .\core0-watcher.ps1 -Once
-
-# Uninstall: remove the task, stop the watcher, restore saved CPU sets (run as Administrator)
-.\core0-watcher.ps1 -Remove
 ```
 
 Check that a process was moved:
@@ -71,6 +69,8 @@ Check that a process was moved:
 ```powershell
 Get-Content .\watcher.log -Tail 20
 ```
+
+To uninstall, stop and unregister the `Copilot-Core0-CPU-Set-Watcher` scheduled task from Task Scheduler. CPU-set restrictions already applied to running processes remain until those processes exit or Windows restarts.
 
 ## Requirements
 
@@ -80,8 +80,8 @@ Get-Content .\watcher.log -Tail 20
 
 ## Tests
 
-Run the state persistence tests with Pester under Windows PowerShell 5.1:
+Run the watcher tests with Pester under Windows PowerShell 5.1:
 
 ```powershell
-Invoke-Pester .\tests\state.Tests.ps1
+Invoke-Pester .\tests\watcher.Tests.ps1
 ```
