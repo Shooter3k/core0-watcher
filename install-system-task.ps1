@@ -11,12 +11,16 @@ try {
     # Make existing files inherit the folder ACL instead of receiving explicit (OI)(CI) entries.
     & icacls.exe (Join-Path $dir '*') /reset /T /C /Q | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "icacls reset failed with exit code $LASTEXITCODE" }
+    # Owners can rewrite an ACL even without an explicit write grant.
+    & icacls.exe $dir /setowner '*S-1-5-32-544' /T /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls setowner failed with exit code $LASTEXITCODE" }
 
     $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($existing) {
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        $watcherPattern = '-File\s+"?' + [regex]::Escape($script) + '"?(\s|$)'
         Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
-            Where-Object { $_.CommandLine -like "*core0-watcher.ps1*" -and $_.CommandLine -match '\s-File\s' } |
+            Where-Object { $_.CommandLine -match $watcherPattern } |
             ForEach-Object { Stop-Process -Id ([int]$_.ProcessId) -Force -ErrorAction SilentlyContinue }
         Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
     }
@@ -28,7 +32,10 @@ try {
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Keeps processes in all sessions (including services) off logical processors 0 and 1; kernel DPC/ISR scheduling is unchanged.' | Out-Null
     Start-ScheduledTask -TaskName $taskName
     Start-Sleep -Seconds 5
-    "OK state=$((Get-ScheduledTask -TaskName $taskName).State)" | Set-Content -LiteralPath $resultPath
+    $state = (Get-ScheduledTask -TaskName $taskName).State
+    if ($state -ne 'Running') { throw "Task did not remain running (state=$state)." }
+    "OK state=$state" | Set-Content -LiteralPath $resultPath
 } catch {
     "FAIL $($_.Exception.Message)" | Set-Content -LiteralPath $resultPath
+    throw
 }

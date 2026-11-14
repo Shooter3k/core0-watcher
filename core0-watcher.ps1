@@ -116,13 +116,48 @@ function Set-DefaultCpuSetIds([IntPtr]$Handle, [uint32[]]$Ids) {
 
 function Read-State {
     if (Test-Path -LiteralPath $statePath) {
-        return @(Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json)
+        try {
+            $json = [IO.File]::ReadAllText($statePath)
+            $trimmed = $json.Trim()
+            if ($trimmed -match '^\[\s*\]$') { return @() }
+            if (-not ($trimmed.StartsWith('[') -or $trimmed.StartsWith('{'))) {
+                throw 'Expected a JSON array or object.'
+            }
+            $decoded = ConvertFrom-Json -InputObject $json -ErrorAction Stop
+            $entries = @($decoded)
+            if ($entries.Count -eq 0) { throw 'State contains no valid entries.' }
+            foreach ($entry in $entries) {
+                foreach ($name in @('Key', 'ProcessId', 'StartKey', 'CpuSetIds')) {
+                    if ($null -eq $entry -or $entry.PSObject.Properties.Name -notcontains $name) {
+                        throw "State entry is missing $name."
+                    }
+                }
+            }
+            return $entries
+        } catch {
+            throw [IO.InvalidDataException]::new(
+                "Cannot read process state at ${statePath}: $($_.Exception.Message). Preserve the file and restore a valid backup before restarting.",
+                $_.Exception
+            )
+        }
     }
     return @()
 }
 
 function Save-State($State) {
-    $State | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding UTF8
+    $entries = [object[]]@($State)
+    $json = ConvertTo-Json -InputObject $entries -Depth 5
+    $tempPath = "$statePath.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllText($tempPath, $json, [Text.UTF8Encoding]::new($true))
+        if ([IO.File]::Exists($statePath)) {
+            [IO.File]::Replace($tempPath, $statePath, "$statePath.bak")
+        } else {
+            [IO.File]::Move($tempPath, $statePath)
+        }
+    } finally {
+        if ([IO.File]::Exists($tempPath)) { [IO.File]::Delete($tempPath) }
+    }
 }
 
 function Invoke-Apply {
@@ -240,6 +275,9 @@ if ($Once) {
 Write-Log "Watcher started as $([Security.Principal.WindowsIdentity]::GetCurrent().Name) in session $((Get-Process -Id $PID).SessionId)."
 while ($true) {
     try { Invoke-Apply }
-    catch { Write-Log "WATCHER-ERROR $($_.Exception.Message)" }
+    catch {
+        Write-Log "WATCHER-ERROR $($_.Exception.Message)"
+        exit 1
+    }
     Start-Sleep -Milliseconds 500
 }
