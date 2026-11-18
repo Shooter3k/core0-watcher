@@ -3,7 +3,7 @@ $tokens = $null
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw "Cannot parse $scriptPath" }
-foreach ($name in @('Get-ProcessStartKey', 'Get-CpuSetIds', 'Set-ProcessCpuSets', 'Invoke-Apply')) {
+foreach ($name in @('Write-Log', 'Get-ProcessStartKey', 'Get-CpuSetIds', 'Set-ProcessCpuSets', 'Invoke-Apply')) {
     $definition = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -55,5 +55,19 @@ Describe 'Watcher process tracking' {
         $source = Get-Content -LiteralPath $scriptPath -Raw
         $source | Should Not Match 'process-state|Read-State|Save-State|Invoke-Restore|switch\]\$Remove'
         $ast.ParamBlock.Parameters.Name.VariablePath.UserPath | Should Be 'Once'
+    }
+}
+
+Describe 'Watcher logging' {
+    It 'does not throw when the log file is locked by another program' {
+        $logPath = Join-Path $TestDrive 'watcher.log'
+        $maxLogBytes = 5MB
+        $ErrorActionPreference = 'Stop'
+        Set-Content -LiteralPath $logPath -Value ''
+        $lock = [IO.File]::Open($logPath, 'Open', 'Read', 'Read')
+        try { { Write-Log 'test' } | Should Not Throw }
+        finally { $lock.Close() }
+        Write-Log 'after unlock'
+        (Get-Content -LiteralPath $logPath -Raw) | Should Match 'after unlock'
     }
 }

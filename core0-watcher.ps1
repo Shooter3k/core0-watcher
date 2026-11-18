@@ -32,11 +32,19 @@ public static class Core0CpuSets {
 }
 
 function Write-Log([string]$Message) {
-    $stamp = [DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss')
-    if ((Test-Path -LiteralPath $logPath) -and (Get-Item -LiteralPath $logPath).Length -gt $maxLogBytes) {
-        Move-Item -LiteralPath $logPath -Destination "$logPath.old" -Force
+    $stamp = [DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss.fff')
+    # Log writes can fail while another program has the file open; logging must never stop the watcher.
+    for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        try {
+            if ((Test-Path -LiteralPath $logPath) -and (Get-Item -LiteralPath $logPath).Length -gt $maxLogBytes) {
+                Move-Item -LiteralPath $logPath -Destination "$logPath.old" -Force
+            }
+            [IO.File]::AppendAllText($logPath, "$stamp $Message`r`n")
+            return
+        } catch {
+            Start-Sleep -Milliseconds 20
+        }
     }
-    Add-Content -LiteralPath $logPath -Value "$stamp $Message"
 }
 
 function Get-CpuSetIds {
