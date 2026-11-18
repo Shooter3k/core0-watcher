@@ -12,7 +12,7 @@ After changing the CPU sets, a later sample showed core 0 load around 5%. This d
 
 ## What it does
 
-- Enumerates running processes in all sessions, including services such as databases, with a 100 ms delay between scans.
+- Enumerates running processes in all sessions, including services such as databases, with a 500 ms delay between scans.
 - For each new process, calls `SetProcessDefaultCpuSets` with every CPU set **except** group 0, logical processors 0 and 1.
 - Keeps only an in-memory list of processes it has already checked, so each process is adjusted once and the list is rebuilt automatically if the watcher restarts.
 - Does not save previous CPU-set selections or any per-process state.
@@ -25,7 +25,7 @@ It does **not** change kernel ISR/DPC routing, and it does not use hard affinity
 
 - Protected processes (Microsoft Defender, some `svchost` instances, WSL `init`) cannot be opened even by SYSTEM and are skipped with `OpenProcess error 5`.
 - `OpenProcess error 87` can mean a process exited before it could be adjusted; other errors should be investigated.
-- The watcher sleeps for 100 ms between scans; scan time adds to that delay. A process may run on cores 0–1 until a subsequent scan reaches it.
+- The watcher sleeps for 500 ms between scans; scan time adds to that delay. A process may run on cores 0–1 until a subsequent scan reaches it.
 - On an unexpected error, the watcher logs the error and exits; Task Scheduler may restart it up to three times.
 - The excluded cores are hardcoded (`$excludedGroup` / `$excludedLogicalProcessors` at the top of the script).
 

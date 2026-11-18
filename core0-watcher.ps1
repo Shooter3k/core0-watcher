@@ -154,5 +154,5 @@ while ($true) {
         Write-Log "WATCHER-ERROR $($_.Exception.Message)"
         exit 1
     }
-    Start-Sleep -Milliseconds 100
+    Start-Sleep -Milliseconds 500
 }
