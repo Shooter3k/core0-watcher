@@ -3,7 +3,7 @@ $tokens = $null
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw "Cannot parse $scriptPath" }
-foreach ($name in @('Write-Log', 'Get-ProcessStartKey', 'Get-CpuSetIds', 'Set-ProcessCpuSets', 'Invoke-Apply')) {
+foreach ($name in @('Write-Log', 'New-HeartbeatStats', 'Update-Heartbeat', 'Get-ProcessStartKey', 'Get-CpuSetIds', 'Set-ProcessCpuSets', 'Invoke-Apply')) {
     $definition = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -69,5 +69,18 @@ Describe 'Watcher logging' {
         finally { $lock.Close() }
         Write-Log 'after unlock'
         (Get-Content -LiteralPath $logPath -Raw) | Should Match 'after unlock'
+    }
+}
+
+Describe 'Watcher heartbeat' {
+    It 'reports scan count, slowest scan and longest gap once per interval' {
+        $heartbeatSeconds = 10
+        $t0 = [DateTime]'2026-01-01T00:00:00'
+        $stats = New-HeartbeatStats $t0
+        Update-Heartbeat $stats $t0 $t0.AddMilliseconds(40) | Should BeNullOrEmpty
+        Update-Heartbeat $stats $t0.AddSeconds(1) $t0.AddSeconds(1).AddMilliseconds(90) | Should BeNullOrEmpty
+        # A 25-second stall between scans must show up as the max gap.
+        Update-Heartbeat $stats $t0.AddSeconds(26) $t0.AddSeconds(26).AddMilliseconds(30) | Should Be 'ALIVE scans=3 maxScanMs=90 maxGapMs=25000'
+        Update-Heartbeat $stats $t0.AddSeconds(27) $t0.AddSeconds(27).AddMilliseconds(10) | Should BeNullOrEmpty
     }
 }

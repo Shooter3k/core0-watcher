@@ -8,6 +8,7 @@ $logPath = Join-Path $dataDir 'watcher.log'
 $excludedGroup = 0
 $excludedLogicalProcessors = @(0, 1)
 $maxLogBytes = 5MB
+$heartbeatSeconds = 10
 # Core OS processes that are left untouched.
 $skipNames = @(
     'Idle', 'System', 'Registry', 'Secure System', 'Memory Compression',
@@ -138,6 +139,31 @@ function Invoke-Apply([hashtable]$Known) {
     }
 }
 
+function New-HeartbeatStats([DateTime]$Now) {
+    return @{ WindowStart = $Now; LastScanStart = $null; Scans = 0; MaxScanMs = 0.0; MaxGapMs = 0.0 }
+}
+
+# Records one scan and returns an ALIVE line once per heartbeat interval. MaxGapMs is the longest time
+# between the starts of consecutive scans, so a stalled watcher shows up as a large gap.
+function Update-Heartbeat([hashtable]$Stats, [DateTime]$ScanStart, [DateTime]$ScanEnd) {
+    $Stats.Scans++
+    $scanMs = ($ScanEnd - $ScanStart).TotalMilliseconds
+    if ($scanMs -gt $Stats.MaxScanMs) { $Stats.MaxScanMs = $scanMs }
+    if ($null -ne $Stats.LastScanStart) {
+        $gapMs = ($ScanStart - $Stats.LastScanStart).TotalMilliseconds
+        if ($gapMs -gt $Stats.MaxGapMs) { $Stats.MaxGapMs = $gapMs }
+    }
+    $Stats.LastScanStart = $ScanStart
+    if (($ScanEnd - $Stats.WindowStart).TotalSeconds -lt $heartbeatSeconds) { return $null }
+
+    $line = 'ALIVE scans={0} maxScanMs={1:F0} maxGapMs={2:F0}' -f $Stats.Scans, $Stats.MaxScanMs, $Stats.MaxGapMs
+    $Stats.WindowStart = $ScanEnd
+    $Stats.Scans = 0
+    $Stats.MaxScanMs = 0.0
+    $Stats.MaxGapMs = 0.0
+    return $line
+}
+
 New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
 
 $known = @{}
@@ -148,11 +174,15 @@ if ($Once) {
 }
 
 Write-Log "Watcher started as $([Security.Principal.WindowsIdentity]::GetCurrent().Name) in session $((Get-Process -Id $PID).SessionId)."
+$heartbeat = New-HeartbeatStats ([DateTime]::UtcNow)
 while ($true) {
+    $scanStart = [DateTime]::UtcNow
     try { Invoke-Apply $known }
     catch {
         Write-Log "WATCHER-ERROR $($_.Exception.Message)"
         exit 1
     }
+    $line = Update-Heartbeat $heartbeat $scanStart ([DateTime]::UtcNow)
+    if ($line) { Write-Log $line }
     Start-Sleep -Milliseconds 500
 }

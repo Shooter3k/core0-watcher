@@ -18,6 +18,7 @@ After changing the CPU sets, a later sample showed core 0 load around 5%. This d
 - Does not save previous CPU-set selections or any per-process state.
 - Skips core OS processes: `Idle`, `System`, `Registry`, `Secure System`, `Memory Compression`, `smss`, `csrss`, `wininit`, `winlogon`, `services`, `lsass`, `LsaIso`.
 - Logs actions to `watcher.log` (rotated to `watcher.log.old` at 5 MB).
+- Every 10 seconds, logs an `ALIVE` line with the number of scans, the slowest scan (`maxScanMs`), and the longest time between the starts of two scans (`maxGapMs`). A missing `ALIVE` line or a large `maxGapMs` means the watcher was stalled.
 
 It does **not** change kernel ISR/DPC routing, and it does not use hard affinity masks. CPU sets are a soft preference that Windows honors for thread scheduling, and they only affect the processes the script touches.
 
