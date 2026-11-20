@@ -73,6 +73,15 @@ Get-Content .\watcher.log -Tail 20
 
 To uninstall, stop and unregister the `Copilot-Core0-CPU-Set-Watcher` scheduled task from Task Scheduler. CPU-set restrictions already applied to running processes remain until those processes exit or Windows restarts.
 
+## Lag recorder (diagnostics)
+
+`tools\lag-recorder.ps1` keeps a kernel trace (DPCs, interrupts, disk I/O, CPU samples) in a 4 GB circular memory buffer and saves it to `M:\lagtraces` when the system stalls: listing processes takes over 1 second, processor 0 spends over 20% of its time in DPCs, or a file named `trigger` is created in the output folder. It saves at most 5 traces, waits 2 minutes between them, and logs each trigger to `recorder.log`. Requires Administrator and the Windows Performance Toolkit (`xperf`).
+
+```powershell
+.\tools\lag-recorder.ps1          # run until Ctrl+C
+.\tools\lag-recorder.ps1 -Stop    # stop the kernel trace if the window was closed
+```
+
 ## Requirements
 
 - Windows 10/11 (CPU Sets API)
